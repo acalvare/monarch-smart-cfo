@@ -1,0 +1,17 @@
+services:
+  monarch-cfo:
+    image: ghcr.io/acalvare/monarch-smart-cfo:latest
+    container_name: monarch-smart-cfo
+    restart: unless-stopped
+    ports:
+      - "3080:3080"
+    environment:
+      - NODE_ENV=production
+      - PORT=3080
+      - DATA_DIR=/data
+      - TZ=America/Los_Angeles
+      - PARTNER_A_NAME=Partner A
+      - PARTNER_B_NAME=Partner B
+    volumes:
+      # Maps persistent SQLite database + Undo Log to your Unraid appdata share
+      - /mnt/user/appdata/monarch-cfo:/data

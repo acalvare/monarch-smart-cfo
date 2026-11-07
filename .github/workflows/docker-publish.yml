@@ -1,0 +1,67 @@
+name: Build and Publish Unraid Docker Image (GHCR)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Security & Privacy Audit (Block Secrets, SQLite DBs & .env files)
+        run: |
+          if git ls-files | grep -E '\.(sqlite|sqlite-wal|sqlite-shm|db)$|^\.env$'; then
+            echo "::error::Database or .env file detected in git index! Aborting public build."
+            exit 1
+          fi
+          if grep -rnE '(sk-[a-zA-Z0-9]{20,}|AIza[0-9A-Za-z-_]{35}|ghp_[a-zA-Z0-9]{36}|discord\.com/api/webhooks/[0-9]+/[a-zA-Z0-9_-]+)' server/ public/ Dockerfile docker-compose.yml; then
+            echo "::error::Potential API key or live webhook URL detected in source! Aborting public build."
+            exit 1
+          fi
+          echo "Security & Privacy check passed: zero secrets, tokens, or database files present."
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata & Unraid OCI labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-
+          labels: |
+            org.opencontainers.image.title=Monarch Smart CFO
+            org.opencontainers.image.description=Copilot-style Personal CFO & Smart Finance Dashboard powered by Monarch Money MCP and SQLite for Unraid
+            net.unraid.docker.webui=http://[IP]:[PORT:3080]/
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

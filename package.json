@@ -1,0 +1,15 @@
+{
+  "name": "monarch-smart-cfo",
+  "version": "1.0.0",
+  "description": "Self-hosted Smart Finance & Personal CFO Dashboard powered by Monarch Money MCP for Unraid",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "seed": "node server/seed.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "license": "MIT"
+}

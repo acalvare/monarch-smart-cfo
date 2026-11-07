@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>monarch-smart-cfo</Name>
+  <Repository>ghcr.io/acalvare/monarch-smart-cfo:latest</Repository>
+  <Registry>https://github.com/acalvare/monarch-smart-cfo/pkgs/container/monarch-smart-cfo</Registry>
+  <Network>bridge</Network>
+  <Privileged>false</Privileged>
+  <Project>https://github.com/acalvare/monarch-smart-cfo</Project>
+  <Overview>Self-hosted Copilot-style Smart Finance &amp; Personal CFO Dashboard powered by Monarch Money MCP (https://api.monarch.com/mcp) with local SQLite cache, Stage &amp; Approve Triage Queue + Undo Log, and Hybrid AI Briefings.</Overview>
+  <Category>Productivity: Tools:Finance</Category>
+  <WebUI>http://[IP]:[PORT:3080]/</WebUI>
+  <Config Name="WebUI Port" Target="3080" Default="3080" Mode="tcp" Description="Dashboard HTTP Port" Type="Port" Display="always" Required="true" Mask="false">3080</Config>
+  <Config Name="AppData Storage (SQLite DB &amp; Undo Log)" Target="/data" Default="/mnt/user/appdata/monarch-cfo" Mode="rw" Description="Persistent SQLite storage path on Unraid" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/monarch-cfo</Config>
+  <Config Name="Monarch MCP OAuth Token (Optional)" Target="MONARCH_OAUTH_TOKEN" Default="" Mode="" Description="Optional Monarch MCP OAuth token for scheduled background syncs" Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="Partner A Name" Target="PARTNER_A_NAME" Default="Partner A" Mode="" Description="Display name for Household Partner A" Type="Variable" Display="advanced" Required="false" Mask="false">Partner A</Config>
+  <Config Name="Partner B Name" Target="PARTNER_B_NAME" Default="Partner B" Mode="" Description="Display name for Household Partner B" Type="Variable" Display="advanced" Required="false" Mask="false">Partner B</Config>
+</Container>
