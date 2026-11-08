@@ -115,6 +115,165 @@ function extractMcpToolJson(rpcResult) {
   return rpcResult?.body?.result || rpcResult?.body || null;
 }
 
+function findArraysInObject(obj, results = []) {
+  if (!obj || typeof obj !== 'object') return results;
+  if (Array.isArray(obj)) {
+    if (obj.length > 0 && typeof obj[0] === 'object') results.push(obj);
+    return results;
+  }
+  for (const val of Object.values(obj)) {
+    if (Array.isArray(val) && val.length > 0 && typeof val[0] === 'object') {
+      results.push(val);
+    } else if (val && typeof val === 'object') {
+      findArraysInObject(val, results);
+    }
+  }
+  return results;
+}
+
+function transformMcpResultsToAppState(rawResults) {
+  const palette = ['#10b981', '#06b6d4', '#38bdf8', '#f59e0b', '#f43f5e', '#8b5cf6', '#ec4899', '#14b8a6', '#eab308', '#3b82f6'];
+  const fixedKeywords = ['mortgage', 'rent', 'utilities', 'utility', 'electric', 'water', 'gas', 'internet', 'fiber', 'phone', 'insurance', 'auto', 'car', 'loan', 'childcare', 'daycare', 'tuition', 'hoa', 'tax', 'subscription'];
+
+  const accounts = [];
+  const categoriesMap = new Map();
+  const transactions = [];
+  const recurring = [];
+  const triage = [];
+  let totalPositiveIncome = 0;
+
+  const allArrays = findArraysInObject(rawResults);
+  for (const arr of allArrays) {
+    for (const item of arr) {
+      if (!item || typeof item !== 'object') continue;
+
+      // Detect Account-like object
+      if ((item.displayName || item.name) && (item.currentBalance !== undefined || item.balance !== undefined || item.type)) {
+        const name = String(item.displayName || item.name);
+        const bal = Number(item.currentBalance ?? item.balance ?? item.displayBalance ?? 0);
+        const rawType = String(item.type?.name || item.type || item.subtype?.name || item.subtype || '').toLowerCase();
+        const inst = String(item.institution?.name || item.institution || name.split(' ')[0]);
+        if (!accounts.some(a => a.name === name)) {
+          const typeLabel = rawType.includes('401') || rawType.includes('ira') || rawType.includes('retirement') ? 'Retirement'
+            : rawType.includes('brokerage') || rawType.includes('invest') || rawType.includes('stock') ? 'Investments'
+            : rawType.includes('saving') || rawType.includes('hysa') || name.toLowerCase().includes('savings') ? 'Cash (HYSA)'
+            : rawType.includes('credit') || rawType.includes('card') ? 'Credit Card'
+            : rawType.includes('loan') || rawType.includes('mortgage') ? 'Loan'
+            : 'Cash';
+          accounts.push({
+            name,
+            inst,
+            type: typeLabel,
+            apy: typeLabel.includes('HYSA') ? '4.50%' : '—',
+            bal: (typeLabel === 'Credit Card' || typeLabel === 'Loan') && bal > 0 ? -bal : bal,
+            owner: 'joint'
+          });
+        }
+      }
+
+      // Detect Transaction-like object
+      if (item.amount !== undefined && (item.merchant || item.plaidName || item.description || item.date)) {
+        const amt = Number(item.amount || 0);
+        const dt = String(item.date || new Date().toISOString().slice(0, 10));
+        const merch = String(item.merchant?.name || item.merchant || item.description || item.plaidName || 'Merchant');
+        const catName = String(item.category?.name || item.category || 'Uncategorized');
+        const acctName = String(item.account?.displayName || item.account?.name || item.account || 'Account');
+
+        if (amt > 0 && (catName.toLowerCase().includes('paycheck') || catName.toLowerCase().includes('income') || amt >= 500)) {
+          totalPositiveIncome += amt;
+          continue;
+        }
+        const spend = Math.abs(amt);
+        if (spend === 0 || catName.toLowerCase().includes('transfer') || catName.toLowerCase().includes('credit card payment')) continue;
+
+        if (!categoriesMap.has(catName)) {
+          const isFixed = fixedKeywords.some(k => catName.toLowerCase().includes(k));
+          categoriesMap.set(catName, {
+            id: 'cat_' + catName.toLowerCase().replace(/[^a-z0-9]+/g, '_'),
+            name: catName,
+            icon: isFixed ? '🏠' : '💳',
+            group: isFixed ? 'Fixed Baseline' : 'Flexible Living',
+            type: isFixed ? 'fixed' : 'disc',
+            color: palette[categoriesMap.size % palette.length],
+            total: 0,
+            mtd: 0
+          });
+        }
+        const cObj = categoriesMap.get(catName);
+        cObj.total += spend;
+        cObj.mtd += spend;
+
+        if (transactions.length < 40) {
+          transactions.push({
+            id: String(item.id || 'tx_' + transactions.length),
+            date: dt.slice(5),
+            merchant: merch,
+            catId: cObj.id,
+            amount: Math.round(spend * 100) / 100,
+            account: acctName,
+            owner: 'joint',
+            avatar: merch.slice(0, 1).toUpperCase(),
+            color: cObj.color,
+            tag: '#MonarchMCP'
+          });
+        }
+
+        if (triage.length < 10 && catName.toLowerCase().includes('uncategorized')) {
+          triage.push({
+            id: 'tri_' + (triage.length + 1),
+            date: dt.slice(5),
+            fullDate: dt,
+            amount: Math.round(spend * 100) / 100,
+            avatar: merch.slice(0, 1).toUpperCase(),
+            avatarBg: cObj.color,
+            account: acctName,
+            owner: 'joint',
+            catId: cObj.id,
+            issue: 'Uncategorized',
+            confidence: 93,
+            before: { merchant: merch, category: 'Uncategorized', tags: 'None' },
+            after: { merchant: merch, category: 'Shopping & General', tags: '#Reviewed' },
+            reason: `Synced from Monarch MCP (${dt})`,
+            status: 'staged'
+          });
+        }
+      }
+    }
+  }
+
+  const categories = Array.from(categoriesMap.values())
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 14)
+    .map(c => {
+      const avg = Math.max(25, Math.round(c.total));
+      return {
+        id: c.id,
+        name: c.name,
+        icon: c.icon,
+        group: c.group,
+        type: c.type,
+        color: c.color,
+        budget: Math.round(avg * 1.05),
+        mtd: Math.round(c.mtd),
+        avg: { all: avg, joint: avg, partner_a: Math.round(avg * 0.5), partner_b: Math.round(avg * 0.5) },
+        hist: [avg, avg, avg, avg, avg, Math.round(c.mtd)],
+        merchants: [{ n: c.name, v: '$' + avg.toLocaleString(), cnt: 'MCP Sync' }]
+      };
+    });
+
+  const statePatch = { isRealData: true, lastImportedAt: new Date().toISOString() };
+  if (totalPositiveIncome > 0) {
+    const inc = Math.round(totalPositiveIncome);
+    statePatch.monthlyIncome = { all: inc, joint: inc, partner_a: Math.round(inc * 0.55), partner_b: Math.round(inc * 0.45) };
+  }
+  if (accounts.length) statePatch.accounts = accounts;
+  if (categories.length) statePatch.categories = categories;
+  if (transactions.length) statePatch.transactions = transactions;
+  if (recurring.length) statePatch.recurring = recurring;
+  if (triage.length) statePatch.triage = triage;
+  return statePatch;
+}
+
 async function syncLiveFromMonarchMcp(accessToken) {
   const initRes = await callMcpJsonRpc(accessToken, null, 'initialize', {
     protocolVersion: '2025-03-26',
@@ -148,7 +307,18 @@ async function syncLiveFromMonarchMcp(accessToken) {
     VALUES ('monarch_mcp_raw_dump', ?, datetime('now'))
   `).run(JSON.stringify({ syncedAt: new Date().toISOString(), toolNames, rawResults }));
 
-  return { toolNames, rawResults };
+  const statePatch = transformMcpResultsToAppState(rawResults);
+  if (statePatch.accounts || statePatch.categories || statePatch.transactions) {
+    const existingRow = db.prepare(`SELECT value FROM settings WHERE key = 'live_app_state_json'`).get();
+    const existing = existingRow && existingRow.value ? JSON.parse(existingRow.value) : {};
+    const merged = { ...existing, ...statePatch };
+    db.prepare(`
+      INSERT OR REPLACE INTO settings (key, value, updated_at)
+      VALUES ('live_app_state_json', ?, datetime('now'))
+    `).run(JSON.stringify(merged));
+  }
+
+  return { toolNames, rawResults, statePatch };
 }
 
 const server = http.createServer(async (req, res) => {
@@ -156,13 +326,24 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key'
     });
     return res.end();
   }
 
   const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const pathname = parsedUrl.pathname;
+
+  // Optional API Key gate if CFO_API_KEY is set when exposing via Cloudflare Tunnel
+  const requiredApiKey = process.env.CFO_API_KEY;
+  if (requiredApiKey && pathname.startsWith('/api/') && pathname !== '/api/health') {
+    const authHeader = req.headers['authorization'] || '';
+    const xApiKey = req.headers['x-api-key'] || parsedUrl.searchParams.get('api_key') || '';
+    const token = authHeader.replace(/^Bearer\s+/i, '').trim() || xApiKey;
+    if (token !== requiredApiKey) {
+      return sendJson(res, 401, { ok: false, error: 'Unauthorized: valid CFO_API_KEY required.' });
+    }
+  }
 
   try {
     // 1. Healthcheck
@@ -258,7 +439,7 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         message: 'Monarch OAuth connected & MCP tools queried!',
         toolNames: mcpSync.toolNames,
-        rawResults: mcpSync.rawResults
+        statePatch: mcpSync.statePatch
       });
     }
 

@@ -1381,12 +1381,34 @@
               ` : ''}
             </div>
 
+            <!-- BUILT-IN MONARCH OAUTH 2.1 PKCE LOGIN (ZERO TUNNEL NEEDED) -->
+            <div class="c-inset p-4 flex flex-col gap-3 border border-emerald-500/30">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="flex items-center gap-2">
+                  <span class="text-xs font-bold text-emerald-400">🔐 Direct Monarch OAuth 2.1 Sign-In (100% LAN-Only — No Cloudflare Tunnel Needed)</span>
+                  <span class="text-[11px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-semibold">Recommended</span>
+                </div>
+              </div>
+              <p class="text-xs leading-relaxed" style="color: var(--text-secondary);">
+                Your Unraid container connects outbound to <code class="tabular">https://api.monarch.com/mcp</code> directly—so you don't need to expose Unraid to the internet:
+              </p>
+              <div class="grid grid-cols-1 md:grid-cols-12 gap-2.5 items-center">
+                <button onclick="startMonarchOAuthFlow()" class="md:col-span-4 px-3.5 py-2.5 rounded-xl text-xs font-bold bg-emerald-500 text-slate-950 hover:bg-emerald-400 transition">
+                  1️⃣ Open Monarch OAuth Login Page ↗
+                </button>
+                <input id="oauth-callback-input" type="text" placeholder="2️⃣ After clicking Authorize, paste the http://localhost:3080/callback?code=... URL here" class="md:col-span-5 p-2.5 rounded-xl text-xs tabular border border-slate-500/30 bg-slate-900/40" style="color: var(--text-primary);" />
+                <button onclick="completeMonarchOAuthExchange()" class="md:col-span-3 px-3.5 py-2.5 rounded-xl text-xs font-bold bg-cyan-500 text-slate-950 hover:bg-cyan-400 transition">
+                  3️⃣ Exchange &amp; Sync MCP
+                </button>
+              </div>
+            </div>
+
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <!-- METHOD A: MONARCH CSV EXPORT UPLOAD -->
               <div class="c-inset p-4 flex flex-col gap-3">
                 <div class="flex items-center justify-between">
-                  <span class="text-xs font-bold text-emerald-400">Method A: Upload Monarch CSVs (0 MCP Quota Used)</span>
-                  <span class="text-[11px] px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-semibold">Fastest</span>
+                  <span class="text-xs font-bold text-emerald-400">Option B: Upload Monarch CSVs (0 MCP Quota Used)</span>
+                  <span class="text-[11px] px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-semibold">Zero Quota</span>
                 </div>
                 <p class="text-xs leading-relaxed" style="color: var(--text-secondary);">
                   In Monarch Money web app, go to <strong>Settings → Data</strong> and click <strong>Download Transactions</strong> (and optional <strong>Download Balances</strong>):
@@ -1409,7 +1431,7 @@
               <!-- METHOD B: PUSH FROM MONARCH MCP AGENT (CLAUDE / CURSOR / ANTIGRAVITY) -->
               <div class="c-inset p-4 flex flex-col gap-3">
                 <div class="flex items-center justify-between">
-                  <span class="text-xs font-bold text-cyan-400">Method B: Sync via Your Monarch MCP Assistant</span>
+                  <span class="text-xs font-bold text-cyan-400">Option C: Sync via Your Monarch MCP Assistant</span>
                   <span class="text-[11px] px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-400 font-semibold">MCP Connected</span>
                 </div>
                 <p class="text-xs leading-relaxed" style="color: var(--text-secondary);">
@@ -2036,6 +2058,43 @@
         }
       } catch (e) {
         // Standalone mode fallback
+      }
+    }
+
+    async function startMonarchOAuthFlow() {
+      try {
+        showToast('Registering OAuth 2.1 PKCE session with api.monarch.com...');
+        const res = await fetch('/api/oauth/start', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok || !data.authUrl) throw new Error(data.error || 'Failed to start OAuth');
+        window.open(data.authUrl, '_blank', 'noopener,noreferrer');
+        showToast('Opened Monarch OAuth login! Click Authorize, then paste the redirect URL into Step 2.');
+      } catch (e) {
+        showToast('OAuth start error: ' + e.message);
+      }
+    }
+
+    async function completeMonarchOAuthExchange() {
+      const input = document.getElementById('oauth-callback-input');
+      const val = input ? input.value.trim() : '';
+      if (!val) {
+        showToast('Please paste the http://localhost:3080/callback?code=... URL into Step 2 first.');
+        return;
+      }
+      try {
+        showToast('Exchanging PKCE code & syncing live data from https://api.monarch.com/mcp...');
+        const res = await fetch('/api/oauth/exchange', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callbackUrlOrCode: val })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || 'OAuth exchange failed');
+        await loadAppStateFromServer();
+        showToast('✓ Connected Monarch OAuth & synced live MCP data into Unraid SQLite!');
+        setView('dashboard');
+      } catch (e) {
+        showToast('OAuth exchange error: ' + e.message);
       }
     }
 
