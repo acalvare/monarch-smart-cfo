@@ -639,15 +639,39 @@
 
     function computeMetrics() {
       const o = app.owner;
-      const incomeByOwner = { all: 14800, joint: 14800, partner_a: 8400, partner_b: 6400 };
-      const cashByOwner = { all: 80661, joint: 72621, partner_a: 4150, partner_b: 3890 };
-      const checkingByOwner = { all: 26461, joint: 18421, partner_a: 4150, partner_b: 3890 };
-      const nwByOwner = { all: 189632, joint: 112400, partner_a: 168105, partner_b: 145578 };
+      let income, cash, checking, nw, brokerage = 196400;
 
-      const income = incomeByOwner[o] || 14800;
-      const cash = cashByOwner[o] || 80661;
-      const checking = checkingByOwner[o] || 26461;
-      const nw = nwByOwner[o] || 189632;
+      if (app.isRealData) {
+        const ownerAccounts = app.accounts.filter(a => o === 'all' || a.owner === o || !a.owner);
+        income = Number(app.monthlyIncome?.[o] || app.monthlyIncome?.all || 10000);
+        cash = 0;
+        checking = 0;
+        nw = 0;
+        brokerage = 0;
+        for (const a of ownerAccounts) {
+          const b = Number(a.bal || 0);
+          nw += b;
+          const t = String(a.type || '').toLowerCase();
+          if (t.includes('cash') || t.includes('checking') || t.includes('savings') || t.includes('hysa')) {
+            if (b > 0) cash += b;
+            if (!t.includes('hysa') && !t.includes('savings') && b > 0) {
+              checking += b;
+            }
+          } else if (t.includes('invest') || t.includes('brokerage')) {
+            if (b > 0) brokerage += b;
+          }
+        }
+        if (checking === 0 && cash > 0) checking = Math.round(cash * 0.35);
+      } else {
+        const incomeByOwner = { all: 14800, joint: 14800, partner_a: 8400, partner_b: 6400 };
+        const cashByOwner = { all: 80661, joint: 72621, partner_a: 4150, partner_b: 3890 };
+        const checkingByOwner = { all: 26461, joint: 18421, partner_a: 4150, partner_b: 3890 };
+        const nwByOwner = { all: 189632, joint: 112400, partner_a: 168105, partner_b: 145578 };
+        income = incomeByOwner[o] || 14800;
+        cash = cashByOwner[o] || 80661;
+        checking = checkingByOwner[o] || 26461;
+        nw = nwByOwner[o] || 189632;
+      }
 
       let fixedBurn = 0;
       let rawDiscBurn = 0;
@@ -655,11 +679,11 @@
       let mtdSpend = 0;
 
       for (const c of app.categories) {
-        const val = c.avg[o] ?? c.avg.all;
+        const val = c.avg?.[o] ?? c.avg?.all ?? Number(c.budget || 0);
         if (c.type === 'fixed') fixedBurn += val;
         else rawDiscBurn += val;
-        totalBudget += c.budget;
-        mtdSpend += c.mtd;
+        totalBudget += Number(c.budget || 0);
+        mtdSpend += Number(c.mtd || 0);
       }
 
       const discBurn = Math.round(rawDiscBurn * (1 - app.discCutPct / 100));
@@ -670,10 +694,12 @@
       const discPct = income > 0 ? ((discBurn / income) * 100).toFixed(1) : '0.0';
 
       const baselineRunway = fixedBurn > 0 ? (cash / fixedBurn).toFixed(1) : '99.0';
-      const fullRunway = totalBurn > 0 ? (cash / totalBurn).toFixed(1) : '99.0';
-      const extendedRunway = fixedBurn > 0 ? ((cash + 196400) / fixedBurn).toFixed(1) : '99.0';
+      const fullRunway = totalBurn > 0 ? (totalBurn > 0 ? (cash / totalBurn).toFixed(1) : '99.0') : '99.0';
+      const extendedRunway = fixedBurn > 0 ? ((cash + brokerage) / fixedBurn).toFixed(1) : '99.0';
 
-      const upcoming30dBills = 4448;
+      const upcoming30dBills = app.isRealData
+        ? Math.round(app.recurring.reduce((s, r) => s + Number(r.curr || 0), 0))
+        : 4448;
       const requiredChecking = upcoming30dBills + Number(app.safetyBuffer);
       const sweepableCash = Math.max(0, checking - requiredChecking);
       const annualYieldGain = Math.round(sweepableCash * ((Number(app.hysaApy) - 0.05) / 100));
@@ -686,6 +712,28 @@
         upcoming30dBills, requiredChecking, sweepableCash, annualYieldGain,
         totalBudget, mtdSpend
       };
+    }
+
+    async function saveAppStateToServer() {
+      try {
+        await fetch('/api/app-state', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            isRealData: app.isRealData,
+            monthlyIncome: app.monthlyIncome,
+            categories: app.categories,
+            triage: app.triage,
+            transactions: app.transactions,
+            recurring: app.recurring,
+            accounts: app.accounts,
+            briefings: app.briefings,
+            undoLog: app.undoLog
+          })
+        });
+      } catch (e) {
+        // Ignore when running as standalone static preview
+      }
     }
 
     function approveTriage(id, ev) {
@@ -704,6 +752,7 @@
         afterMerchant: item.after.merchant,
         afterCategory: item.after.category
       });
+      saveAppStateToServer();
       showToast(`✓ Approved "${item.after.merchant}" & saved reversible snapshot in SQLite Undo Log`);
       renderAll();
     }
@@ -715,6 +764,7 @@
       const item = app.triage.find(x => x.id === entry.triageId);
       if (item) item.status = 'staged';
       app.undoLog.splice(idx, 1);
+      saveAppStateToServer();
       showToast(`↺ Reverted "${entry.afterMerchant}" back to "${entry.beforeMerchant}"`);
       renderAll();
     }
@@ -893,12 +943,31 @@
         const filteredTriage = app.triage.filter(t => !q || t.before.merchant.toLowerCase().includes(q) || t.after.merchant.toLowerCase().includes(q));
 
         canvas.innerHTML = `
+          ${!app.isRealData ? `
+          <div class="c-card px-4 py-3 flex flex-wrap items-center justify-between gap-3 border-amber-500/40" style="background: rgba(245, 158, 11, 0.08);">
+            <div class="flex items-center gap-2.5 text-xs">
+              <span class="px-2 py-0.5 rounded font-bold bg-amber-500/20 text-amber-400">DEMO DATA</span>
+              <span style="color: var(--text-secondary);">Currently displaying anonymized demo accounts &amp; transactions. Import your real Monarch Money data via CSV or Monarch MCP to populate your live numbers.</span>
+            </div>
+            <button onclick="setView('unraid')" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-500 text-slate-950 hover:bg-emerald-400 transition shrink-0">
+              📥 Import Real Monarch Data →
+            </button>
+          </div>
+          ` : `
+          <div class="c-card px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 border-emerald-500/30" style="background: rgba(16, 185, 129, 0.06);">
+            <div class="flex items-center gap-2 text-xs">
+              <span class="px-2 py-0.5 rounded font-bold bg-emerald-500/20 text-emerald-400">LIVE MONARCH DATA</span>
+              <span style="color: var(--text-secondary);">Synced with your Unraid SQLite database (<code class="tabular">${app.categories.length}</code> categories, <code class="tabular">${app.accounts.length}</code> accounts, <code class="tabular">${app.transactions.length}</code> recent transactions).</span>
+            </div>
+            <button onclick="setView('unraid')" class="text-xs font-semibold text-emerald-400 hover:underline">Manage Import / Sync →</button>
+          </div>
+          `}
           <!-- HERO CHART CARD WITH MODE SWITCHER -->
           <section class="c-card p-5 flex flex-col gap-4">
             <div class="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <div class="text-xs font-semibold uppercase tracking-wider" style="color: var(--text-muted);">
-                  ${app.heroMode === 'pace' ? 'NOVEMBER SPENDING PACE (DAY 7 OF 30)' : app.heroMode === 'sankey' ? 'MONTHLY CASH FLOW ALLOCATION' : '12-MONTH NET WORTH TRAJECTORY'}
+                  ${app.heroMode === 'pace' ? 'MONTHLY SPENDING PACE' : app.heroMode === 'sankey' ? 'MONTHLY CASH FLOW ALLOCATION' : '12-MONTH NET WORTH TRAJECTORY'}
                 </div>
                 <div class="flex items-baseline gap-3 mt-1">
                   <span class="text-2xl font-bold tabular">
@@ -1293,6 +1362,73 @@
          ------------------------------------------------------------------- */
       else if (app.view === 'unraid') {
         canvas.innerHTML = `
+          <!-- REAL MONARCH DATA IMPORT STUDIO -->
+          <section class="c-card p-5 flex flex-col gap-4 border-emerald-500/40">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div class="flex items-center gap-2">
+                  <span class="px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-500/20 text-emerald-400">STEP 1: IMPORT YOUR REAL DATA</span>
+                  <h2 class="text-sm font-bold">Import Real Monarch Money Accounts, Categories &amp; Transactions</h2>
+                </div>
+                <p class="text-xs mt-1" style="color: var(--text-muted);">
+                  Everything you import stays 100% local inside <code class="tabular text-emerald-400">/mnt/user/appdata/monarch-cfo/monarch-cfo.sqlite</code> on your Unraid server.
+                </p>
+              </div>
+              ${app.isRealData ? `
+                <button onclick="resetToDemoData()" class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-rose-500/40 text-rose-400 hover:bg-rose-500/10 transition">
+                  🗑️ Reset to Demo Data
+                </button>
+              ` : ''}
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <!-- METHOD A: MONARCH CSV EXPORT UPLOAD -->
+              <div class="c-inset p-4 flex flex-col gap-3">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-bold text-emerald-400">Method A: Upload Monarch CSVs (0 MCP Quota Used)</span>
+                  <span class="text-[11px] px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-semibold">Fastest</span>
+                </div>
+                <p class="text-xs leading-relaxed" style="color: var(--text-secondary);">
+                  In Monarch Money web app, go to <strong>Settings → Data</strong> and click <strong>Download Transactions</strong> (and optional <strong>Download Balances</strong>):
+                </p>
+                <div class="flex flex-col gap-2 text-xs">
+                  <label class="flex flex-col gap-1">
+                    <span class="font-semibold" style="color: var(--text-secondary);">1. Monarch Transactions CSV (Required):</span>
+                    <input id="csv-tx-input" type="file" accept=".csv" class="text-xs p-2 rounded-lg border border-slate-500/30 bg-slate-900/40" />
+                  </label>
+                  <label class="flex flex-col gap-1">
+                    <span class="font-semibold" style="color: var(--text-secondary);">2. Monarch Account Balances CSV (Optional):</span>
+                    <input id="csv-bal-input" type="file" accept=".csv" class="text-xs p-2 rounded-lg border border-slate-500/30 bg-slate-900/40" />
+                  </label>
+                </div>
+                <button onclick="importMonarchCsvFiles()" class="mt-1 px-4 py-2.5 rounded-xl text-xs font-bold bg-emerald-500 text-slate-950 hover:bg-emerald-400 transition">
+                  🚀 Parse &amp; Save Real Monarch CSVs to Unraid SQLite
+                </button>
+              </div>
+
+              <!-- METHOD B: PUSH FROM MONARCH MCP AGENT (CLAUDE / CURSOR / ANTIGRAVITY) -->
+              <div class="c-inset p-4 flex flex-col gap-3">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-bold text-cyan-400">Method B: Sync via Your Monarch MCP Assistant</span>
+                  <span class="text-[11px] px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-400 font-semibold">MCP Connected</span>
+                </div>
+                <p class="text-xs leading-relaxed" style="color: var(--text-secondary);">
+                  Copy this prompt into Claude Desktop, Cursor, or ChatGPT (where your Monarch MCP server is connected) to push your live accounts &amp; transactions directly to this Unraid server:
+                </p>
+                <button onclick="copyMcpAgentSyncPrompt()" class="px-3.5 py-2 rounded-lg text-xs font-bold bg-cyan-500 text-slate-950 hover:bg-cyan-400 transition">
+                  📋 Copy 1-Step Prompt for Your Monarch MCP Assistant
+                </button>
+                <div class="flex flex-col gap-1.5 mt-1">
+                  <span class="text-[11px] font-semibold" style="color: var(--text-muted);">Or paste JSON output from your Monarch MCP assistant below:</span>
+                  <textarea id="mcp-json-input" rows="3" placeholder='{"monthlyIncome":{"all":12500},"accounts":[...],"categories":[...],"transactions":[...]}' class="w-full p-2 rounded-lg text-[11px] tabular border border-slate-500/30 bg-slate-900/40" style="color: var(--text-primary);"></textarea>
+                  <button onclick="importMcpJsonFromTextarea()" class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-cyan-500/40 text-cyan-400 hover:bg-cyan-500/10 transition">
+                    📥 Import Pasted MCP JSON into Unraid SQLite
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+
           <section class="c-card p-5 flex flex-col gap-4">
             <div class="flex flex-wrap items-center justify-between gap-3">
               <div>
@@ -1399,6 +1535,7 @@
     function cToggle(catId, type) {
       const c = app.categories.find(x => x.id === catId);
       if (c) c.type = type;
+      saveAppStateToServer();
       showToast(`Reclassified ${c.name} as ${type.toUpperCase()}`);
       renderAll();
     }
@@ -1629,12 +1766,286 @@
       }
     }
 
+    function parseCsvRows(text) {
+      const rows = [];
+      let row = [], cur = '', inQuotes = false;
+      for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        const next = text[i + 1];
+        if (inQuotes) {
+          if (ch === '"' && next === '"') { cur += '"'; i++; }
+          else if (ch === '"') inQuotes = false;
+          else cur += ch;
+        } else {
+          if (ch === '"') inQuotes = true;
+          else if (ch === ',') { row.push(cur.trim()); cur = ''; }
+          else if (ch === '\n' || ch === '\r') {
+            if (ch === '\r' && next === '\n') i++;
+            row.push(cur.trim());
+            if (row.some(c => c !== '')) rows.push(row);
+            row = [];
+            cur = '';
+          } else cur += ch;
+        }
+      }
+      if (cur || row.length) {
+        row.push(cur.trim());
+        if (row.some(c => c !== '')) rows.push(row);
+      }
+      if (rows.length < 2) return [];
+      const headers = rows[0].map(h => h.replace(/^\uFEFF/, '').trim().toLowerCase());
+      return rows.slice(1).map(r => {
+        const obj = {};
+        headers.forEach((h, idx) => { obj[h] = r[idx] ?? ''; });
+        return obj;
+      });
+    }
+
+    async function importMonarchCsvFiles() {
+      const txInput = document.getElementById('csv-tx-input');
+      const balInput = document.getElementById('csv-bal-input');
+      if (!txInput || !txInput.files || !txInput.files[0]) {
+        showToast('Please select your Monarch Transactions CSV file first.');
+        return;
+      }
+
+      const txText = await txInput.files[0].text();
+      const txRows = parseCsvRows(txText);
+      if (!txRows.length) {
+        showToast('Could not parse rows from Transactions CSV.');
+        return;
+      }
+
+      const fixedKeywords = ['mortgage', 'rent', 'utilities', 'utility', 'electric', 'water', 'gas', 'internet', 'fiber', 'phone', 'insurance', 'auto payment', 'car payment', 'loan', 'childcare', 'daycare', 'tuition', 'hoa', 'tax', 'subscriptions'];
+      const skipKeywords = ['transfer', 'credit card payment', 'payment'];
+      const palette = ['#10b981', '#06b6d4', '#38bdf8', '#f59e0b', '#f43f5e', '#8b5cf6', '#ec4899', '#14b8a6', '#eab308', '#3b82f6'];
+
+      // Determine latest month in CSV
+      const dates = txRows.map(r => r.date || '').filter(Boolean).sort();
+      const latestDate = dates[dates.length - 1] || new Date().toISOString().slice(0, 10);
+      const latestYm = latestDate.slice(0, 7);
+
+      const monthsSet = new Set();
+      let totalPositiveIncome = 0;
+      const catMap = new Map();
+      const acctSet = new Set();
+      const parsedTxs = [];
+      const triageItems = [];
+
+      for (const r of txRows) {
+        const dt = r.date || '';
+        const ym = dt.slice(0, 7);
+        if (ym) monthsSet.add(ym);
+        const merchant = r.merchant || r['original statement'] || 'Merchant';
+        const origStmt = r['original statement'] || merchant;
+        const catName = r.category || 'Uncategorized';
+        const acctName = r.account || 'Primary Account';
+        const amtRaw = parseFloat(String(r.amount || '0').replace(/[^0-9.-]/g, '')) || 0;
+        const tags = r.tags || '';
+        const notes = r.notes || '';
+        acctSet.add(acctName);
+
+        const catLower = catName.toLowerCase();
+        if (skipKeywords.some(k => catLower === k || catLower.includes('credit card payment'))) continue;
+
+        if (amtRaw > 0 && (catLower.includes('paycheck') || catLower.includes('income') || catLower.includes('salary') || amtRaw >= 500)) {
+          totalPositiveIncome += amtRaw;
+          continue;
+        }
+
+        if (amtRaw >= 0) continue;
+        const spend = Math.abs(amtRaw);
+
+        if (!catMap.has(catName)) {
+          const isFixed = fixedKeywords.some(k => catLower.includes(k));
+          catMap.set(catName, {
+            id: 'cat_' + catName.toLowerCase().replace(/[^a-z0-9]+/g, '_'),
+            name: catName,
+            icon: isFixed ? '🏠' : '💳',
+            group: isFixed ? 'Fixed Baseline' : 'Flexible Living',
+            type: isFixed ? 'fixed' : 'disc',
+            color: palette[catMap.size % palette.length],
+            byMonth: {},
+            totalSpend: 0,
+            mtd: 0,
+            merchants: {}
+          });
+        }
+        const cEntry = catMap.get(catName);
+        cEntry.totalSpend += spend;
+        cEntry.byMonth[ym] = (cEntry.byMonth[ym] || 0) + spend;
+        if (ym === latestYm) cEntry.mtd += spend;
+        cEntry.merchants[merchant] = (cEntry.merchants[merchant] || 0) + spend;
+
+        if (parsedTxs.length < 40) {
+          parsedTxs.push({
+            id: 'tx_' + parsedTxs.length,
+            date: dt.slice(5),
+            merchant,
+            catId: cEntry.id,
+            amount: Math.round(spend * 100) / 100,
+            account: acctName,
+            owner: 'joint',
+            avatar: merchant.slice(0, 1).toUpperCase(),
+            color: cEntry.color,
+            tag: tags ? '#' + tags.split(',')[0].trim() : '#Monarch'
+          });
+        }
+
+        if (triageItems.length < 10 && (catLower.includes('uncategorized') || /^(SQ \*|TST\*|AMZN|PAYPAL \*)/i.test(origStmt))) {
+          const cleanName = origStmt.replace(/^(SQ \*|TST\*\s*)/i, '').trim();
+          triageItems.push({
+            id: 'tri_' + (triageItems.length + 1),
+            date: dt.slice(5),
+            fullDate: dt,
+            amount: Math.round(spend * 100) / 100,
+            avatar: cleanName.slice(0, 1).toUpperCase(),
+            avatarBg: cEntry.color,
+            account: acctName,
+            owner: 'joint',
+            catId: cEntry.id,
+            issue: catLower.includes('uncategorized') ? 'Uncategorized' : 'Messy POS Name',
+            confidence: 94,
+            before: { merchant: origStmt, category: catName, tags: tags || 'None' },
+            after: { merchant: cleanName, category: catLower.includes('uncategorized') ? 'Shopping & General' : catName, tags: '#Reviewed' },
+            reason: notes ? `Note: "${notes}"` : `Detected from Monarch CSV (${dt})`,
+            status: 'staged'
+          });
+        }
+      }
+
+      const sortedMonths = Array.from(monthsSet).sort().slice(-6);
+      const numMonths = Math.max(1, sortedMonths.length);
+      const avgMonthlyIncome = totalPositiveIncome > 0 ? Math.round(totalPositiveIncome / Math.max(1, monthsSet.size)) : 12000;
+
+      const newCategories = Array.from(catMap.values())
+        .sort((a, b) => b.totalSpend - a.totalSpend)
+        .slice(0, 14)
+        .map(c => {
+          const hist = sortedMonths.map(m => Math.round(c.byMonth[m] || 0));
+          while (hist.length < 6) hist.unshift(hist[0] || 0);
+          const avgAll = Math.round(hist.reduce((s, v) => s + v, 0) / hist.length) || Math.round(c.totalSpend / numMonths);
+          const topMerchants = Object.entries(c.merchants)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 3)
+            .map(([n, v]) => ({ n, v: fmt(v), cnt: '6m total' }));
+          return {
+            id: c.id,
+            name: c.name,
+            icon: c.icon,
+            group: c.group,
+            type: c.type,
+            color: c.color,
+            budget: Math.max(50, Math.round(avgAll * 1.05)),
+            mtd: Math.round(c.mtd),
+            avg: { all: avgAll, joint: avgAll, partner_a: Math.round(avgAll * 0.5), partner_b: Math.round(avgAll * 0.5) },
+            hist,
+            merchants: topMerchants
+          };
+        });
+
+      let newAccounts = [];
+      if (balInput && balInput.files && balInput.files[0]) {
+        const balText = await balInput.files[0].text();
+        const balRows = parseCsvRows(balText);
+        const latestBalByAcct = new Map();
+        for (const r of balRows) {
+          const aName = r.account || r['account name'] || 'Account';
+          const bVal = parseFloat(String(r.balance || r.amount || '0').replace(/[^0-9.-]/g, '')) || 0;
+          latestBalByAcct.set(aName, bVal);
+        }
+        newAccounts = Array.from(latestBalByAcct.entries()).map(([name, bal]) => {
+          const nl = name.toLowerCase();
+          const type = nl.includes('401') || nl.includes('ira') || nl.includes('roth') ? 'Retirement'
+            : nl.includes('vanguard') || nl.includes('fidelity') || nl.includes('schwab') || nl.includes('brokerage') || nl.includes('invest') ? 'Investments'
+            : nl.includes('hysa') || nl.includes('savings') || nl.includes('wealthfront') ? 'Cash (HYSA)'
+            : nl.includes('card') || nl.includes('amex') || nl.includes('sapphire') || nl.includes('visa') ? 'Credit Card'
+            : nl.includes('mortgage') || nl.includes('loan') ? 'Loan'
+            : 'Cash';
+          return { name, inst: name.split(' ')[0], type, apy: type.includes('HYSA') ? '4.50%' : '—', bal, owner: 'joint' };
+        });
+      } else {
+        newAccounts = Array.from(acctSet).slice(0, 12).map(name => ({
+          name, inst: name.split(' ')[0], type: 'Cash', apy: '—', bal: 10000, owner: 'joint'
+        }));
+      }
+
+      app.isRealData = true;
+      app.monthlyIncome = { all: avgMonthlyIncome, joint: avgMonthlyIncome, partner_a: Math.round(avgMonthlyIncome * 0.55), partner_b: Math.round(avgMonthlyIncome * 0.45) };
+      if (newCategories.length) app.categories = newCategories;
+      if (newAccounts.length) app.accounts = newAccounts;
+      if (parsedTxs.length) app.transactions = parsedTxs;
+      if (triageItems.length) app.triage = triageItems;
+
+      await saveAppStateToServer();
+      showToast(`✓ Imported ${txRows.length} Monarch transactions & saved to Unraid SQLite!`);
+      setView('dashboard');
+    }
+
+    function copyMcpAgentSyncPrompt() {
+      const endpoint = window.location.origin + '/api/import';
+      const prompt = `Using my connected Monarch Money MCP server, fetch my accounts, categories, recurring transactions, and the last 6 months of transactions. Aggregate them into this JSON schema and POST it to ${endpoint} (or output the JSON block so I can paste it):
+{
+  "monthlyIncome": { "all": <avg_monthly_net_income_number> },
+  "accounts": [
+    { "name": "<Account Name>", "inst": "<Institution>", "type": "<Cash | Cash (HYSA) | Investments | Retirement | Credit Card | Loan>", "apy": "4.50%", "bal": <number_negative_for_debt>, "owner": "joint" }
+  ],
+  "categories": [
+    { "id": "cat_1", "name": "<Category Name>", "icon": "🏠", "group": "<Fixed Baseline | Flexible Living>", "type": "<fixed | disc>", "color": "#10b981", "budget": <monthly_budget_number>, "mtd": <current_month_spend_number>, "avg": { "all": <6m_monthly_avg_number> }, "hist": [<m1>,<m2>,<m3>,<m4>,<m5>,<m6>], "merchants": [{"n":"<Top Merchant>","v":"$120","cnt":"6m"}] }
+  ],
+  "recurring": [
+    { "id": "r1", "merchant": "<Merchant>", "icon": "⚡", "color": "#10b981", "cat": "<Category>", "day": 15, "date": "Monthly", "owner": "joint", "prev": <prev_amt>, "curr": <curr_amt>, "history": [<m1>,<m2>,<m3>,<m4>,<m5>,<m6>] }
+  ]
+}`;
+      navigator.clipboard.writeText(prompt);
+      showToast('📋 Copied Monarch MCP sync prompt! Paste it into Claude / Cursor / ChatGPT.');
+    }
+
+    async function importMcpJsonFromTextarea() {
+      const el = document.getElementById('mcp-json-input');
+      if (!el || !el.value.trim()) {
+        showToast('Paste a JSON snapshot from your Monarch MCP assistant first.');
+        return;
+      }
+      try {
+        const parsed = JSON.parse(el.value.trim());
+        Object.assign(app, parsed, { isRealData: true });
+        await saveAppStateToServer();
+        showToast('✓ Imported Monarch MCP JSON snapshot into Unraid SQLite!');
+        setView('dashboard');
+      } catch (e) {
+        showToast('Invalid JSON format: ' + e.message);
+      }
+    }
+
+    async function resetToDemoData() {
+      try {
+        await fetch('/api/app-state', { method: 'DELETE' });
+      } catch (e) {}
+      window.location.reload();
+    }
+
+    async function loadAppStateFromServer() {
+      try {
+        const res = await fetch('/api/app-state');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data && data.hasCustomState && data.state) {
+          Object.assign(app, data.state);
+          renderAll();
+        }
+      } catch (e) {
+        // Standalone mode fallback
+      }
+    }
+
     function renderAll() {
       renderCenter();
       renderInspector();
     }
 
     renderAll();
+    loadAppStateFromServer();
   </script>
 </body>
 </html>

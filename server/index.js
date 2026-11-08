@@ -45,7 +45,7 @@ function parseBody(req) {
     let raw = '';
     req.on('data', chunk => {
       raw += chunk;
-      if (raw.length > 2 * 1024 * 1024) {
+      if (raw.length > 25 * 1024 * 1024) {
         reject(new Error('Payload too large'));
       }
     });
@@ -65,7 +65,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization'
     });
     return res.end();
@@ -78,6 +78,38 @@ const server = http.createServer(async (req, res) => {
     // 1. Healthcheck
     if (req.method === 'GET' && pathname === '/api/health') {
       return sendJson(res, 200, { status: 'ok', service: 'monarch-smart-cfo', timestamp: new Date().toISOString() });
+    }
+
+    // 1b. Persistent Live App State (SQLite-backed for imported Monarch CSV / MCP data)
+    if (req.method === 'GET' && pathname === '/api/app-state') {
+      const row = db.prepare(`SELECT value, updated_at FROM settings WHERE key = 'live_app_state_json'`).get();
+      if (!row || !row.value) {
+        return sendJson(res, 200, { ok: true, hasCustomState: false, state: null });
+      }
+      return sendJson(res, 200, { ok: true, hasCustomState: true, updatedAt: row.updated_at, state: JSON.parse(row.value) });
+    }
+
+    if (req.method === 'POST' && (pathname === '/api/app-state' || pathname === '/api/import')) {
+      const body = await parseBody(req);
+      const existingRow = db.prepare(`SELECT value FROM settings WHERE key = 'live_app_state_json'`).get();
+      const existing = existingRow && existingRow.value ? JSON.parse(existingRow.value) : {};
+      const incoming = body.state || body;
+      const merged = {
+        ...existing,
+        ...incoming,
+        isRealData: true,
+        lastImportedAt: new Date().toISOString()
+      };
+      db.prepare(`
+        INSERT OR REPLACE INTO settings (key, value, updated_at)
+        VALUES ('live_app_state_json', ?, datetime('now'))
+      `).run(JSON.stringify(merged));
+      return sendJson(res, 200, { ok: true, message: 'Saved real Monarch data to Unraid SQLite database.', state: merged });
+    }
+
+    if (req.method === 'DELETE' && pathname === '/api/app-state') {
+      db.prepare(`DELETE FROM settings WHERE key = 'live_app_state_json'`).run();
+      return sendJson(res, 200, { ok: true, message: 'Reset to default demo dataset.' });
     }
 
     // 2. Dashboard Payload
