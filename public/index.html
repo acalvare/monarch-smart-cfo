@@ -630,11 +630,24 @@
       document.getElementById('inspector-pane').classList.toggle('closed', !app.inspectorOpen);
     }
 
-    function syncNow() {
-      app.mcpUsed += 4;
-      document.getElementById('side-quota').textContent = `${app.mcpUsed} / 150`;
-      document.getElementById('side-quota-bar').style.width = `${Math.min(100, (app.mcpUsed / 150) * 100).toFixed(1)}%`;
-      showToast('Synced latest transactions & balances from https://api.monarch.com/mcp');
+    async function syncNow() {
+      try {
+        showToast('Syncing live data from https://api.monarch.com/mcp using saved OAuth token...');
+        const res = await fetch('/api/oauth/resync', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || 'MCP sync failed');
+        }
+        app.mcpUsed += 7;
+        const qEl = document.getElementById('side-quota');
+        const qBar = document.getElementById('side-quota-bar');
+        if (qEl) qEl.textContent = `${app.mcpUsed} / 150`;
+        if (qBar) qBar.style.width = `${Math.min(100, (app.mcpUsed / 150) * 100).toFixed(1)}%`;
+        await loadAppStateFromServer();
+        showToast(data.message || '✓ Synced latest transactions & balances from Monarch MCP!');
+      } catch (e) {
+        showToast('MCP Sync Error: ' + e.message);
+      }
     }
 
     function computeMetrics() {
@@ -775,22 +788,46 @@
     function buildHeroPaceChart(m) {
       const w = 820, h = 215, padL = 48, padR = 22, padT = 20, padB = 28;
       const plotW = w - padL - padR, plotH = h - padT - padB;
-      const maxY = Math.max(m.totalBudget, 10200) * 1.08;
+      const maxY = Math.max(m.totalBudget, m.mtdSpend * 1.25, 2000) * 1.08;
       const x = d => +(padL + ((d - 1) / 29) * plotW).toFixed(1);
       const y = v => +(padT + plotH - (v / maxY) * plotH).toFixed(1);
 
-      const days = [
-        { d: 1, v: 3150, desc: 'Nov 1 • Rocket Mortgage ($3,150)' },
-        { d: 2, v: 3462, desc: 'Nov 2 • Whole Foods ($312)' },
-        { d: 3, v: 3752, desc: 'Nov 3 • Amazon 14TB Drive ($290)' },
-        { d: 4, v: 3942, desc: 'Nov 4 • DoorDash x2 ($190)' },
-        { d: 5, v: 4332, desc: 'Nov 5 • Kiso ($342) + Tartine ($48)' },
-        { d: 6, v: 4949, desc: 'Nov 6 • Costco ($468) + Apple ($149)' },
-        { d: 7, v: m.mtdSpend, desc: 'Nov 7 • Delta Flights ($618)' }
-      ];
+      let days;
+      if (app.isRealData) {
+        const recent = app.transactions.slice(0, 7).reverse();
+        let running = 0;
+        days = Array.from({ length: 7 }, (_, idx) => {
+          const dNum = idx + 1;
+          const tx = recent[idx];
+          running = dNum === 7 ? m.mtdSpend : Math.min(m.mtdSpend, Math.round((m.mtdSpend / 7) * dNum));
+          return {
+            d: dNum,
+            v: running,
+            desc: tx ? `${tx.date} • ${tx.merchant.slice(0, 18)}` : `Day ${dNum} MTD`
+          };
+        });
+      } else {
+        days = [
+          { d: 1, v: 3150, desc: 'Nov 1 • Rocket Mortgage ($3,150)' },
+          { d: 2, v: 3462, desc: 'Nov 2 • Whole Foods ($312)' },
+          { d: 3, v: 3752, desc: 'Nov 3 • Amazon 14TB Drive ($290)' },
+          { d: 4, v: 3942, desc: 'Nov 4 • DoorDash x2 ($190)' },
+          { d: 5, v: 4332, desc: 'Nov 5 • Kiso ($342) + Tartine ($48)' },
+          { d: 6, v: 4949, desc: 'Nov 6 • Costco ($468) + Apple ($149)' },
+          { d: 7, v: m.mtdSpend, desc: 'Nov 7 • Delta Flights ($618)' }
+        ];
+      }
 
+      const endEst = Math.max(m.mtdSpend, m.totalBurn || m.totalBudget);
+      const step = (endEst - m.mtdSpend) / 6;
       const proj = [
-        [7, m.mtdSpend], [12, 5811], [16, 6399], [18, 7244], [21, 7689], [24, 8354], [30, 9840]
+        [7, m.mtdSpend],
+        [12, Math.round(m.mtdSpend + step * 1)],
+        [16, Math.round(m.mtdSpend + step * 2)],
+        [18, Math.round(m.mtdSpend + step * 3)],
+        [21, Math.round(m.mtdSpend + step * 4)],
+        [24, Math.round(m.mtdSpend + step * 5)],
+        [30, Math.round(endEst)]
       ];
 
       const actualPts = days.map(p => `${x(p.d)},${y(p.v)}`).join(' ');
@@ -806,10 +843,13 @@
               <stop offset="100%" stop-color="#10b981" stop-opacity="0.0" />
             </linearGradient>
           </defs>
-          ${[3000, 6000, 9000].map(gv => `
+          ${[0.3, 0.6, 0.9].map(r => {
+            const gv = Math.round((maxY * r) / 500) * 500;
+            return `
             <line x1="${padL}" y1="${y(gv)}" x2="${w - padR}" y2="${y(gv)}" stroke="var(--chart-grid)" stroke-width="1" />
-            <text x="${padL - 8}" y="${y(gv) + 4}" text-anchor="end" fill="var(--text-muted)" font-size="11" font-family="monospace">$${gv / 1000}k</text>
-          `).join('')}
+            <text x="${padL - 8}" y="${y(gv) + 4}" text-anchor="end" fill="var(--text-muted)" font-size="11" font-family="monospace">$${(gv / 1000).toFixed(1)}k</text>
+          `;
+          }).join('')}
 
           <!-- Ideal Pace Line -->
           <line x1="${x(1)}" y1="${y(m.totalBudget / 30)}" x2="${x(30)}" y2="${y(m.totalBudget)}" stroke="var(--text-muted)" stroke-dasharray="4 4" stroke-width="1.5" opacity="0.55" />
@@ -836,24 +876,28 @@
             </text>
           </g>
 
-          <text x="${x(1)}" y="${h - 6}" fill="var(--text-muted)" font-size="11">Nov 1</text>
-          <text x="${x(7)}" y="${h - 6}" fill="#10b981" font-size="11" font-weight="600">Today (Nov 7)</text>
-          <text x="${x(15)}" y="${h - 6}" fill="var(--text-muted)" font-size="11">Nov 15</text>
-          <text x="${x(30) - 42}" y="${h - 6}" fill="#f43f5e" font-size="11">Nov 30 Est.</text>
+          <text x="${x(1)}" y="${h - 6}" fill="var(--text-muted)" font-size="11">Day 1</text>
+          <text x="${x(7)}" y="${h - 6}" fill="#10b981" font-size="11" font-weight="600">Today</text>
+          <text x="${x(15)}" y="${h - 6}" fill="var(--text-muted)" font-size="11">Mid-Month</text>
+          <text x="${x(30) - 42}" y="${h - 6}" fill="#f43f5e" font-size="11">Month End Est.</text>
         </svg>
       `;
     }
 
     function buildSankeyDiagram(m) {
       const w = 820, h = 240;
-      const x0 = 20, x1 = 240, x2 = 520, x3 = 790;
+      const x0 = 20, x1 = 240, x2 = 520;
       const nw = 10;
       const poolTop = 30, poolH = 180;
-      const partAH = (8400 / 14800) * poolH;
-      const partBH = (6400 / 14800) * poolH;
-      const fixedH = Math.max(24, (m.fixedBurn / 14800) * poolH);
-      const discH = Math.max(24, (m.discBurn / 14800) * poolH);
-      const saveH = Math.max(24, (m.savings / 14800) * poolH);
+      const incTotal = Math.max(1, m.income || 14800);
+      const pA = Math.round(incTotal * 0.56);
+      const pB = Math.max(0, incTotal - pA);
+      const partAH = (pA / incTotal) * poolH;
+      const partBH = (pB / incTotal) * poolH;
+      const denom = Math.max(incTotal, m.fixedBurn + m.discBurn + m.savings, 1);
+      const fixedH = Math.max(24, (m.fixedBurn / denom) * poolH);
+      const discH = Math.max(24, (m.discBurn / denom) * poolH);
+      const saveH = Math.max(24, (m.savings / denom) * poolH);
 
       const ribbon = (xa, ya0, ya1, xb, yb0, yb1) => {
         const cx = (xa + xb) / 2;
@@ -870,14 +914,14 @@
           <path d="${ribbon(x1 + nw, poolTop + fixedH + discH, poolTop + poolH, x2, 46 + fixedH + discH, 46 + fixedH + discH + saveH)}" fill="#10b981" opacity="0.52" />
 
           <rect x="${x0}" y="24" width="${nw}" height="${partAH}" rx="3" fill="#38bdf8" />
-          <text x="${x0 + 16}" y="${24 + partAH / 2 + 4}" fill="var(--text-primary)" font-size="11.5" font-weight="600">Partner A Pay ($8.4k)</text>
+          <text x="${x0 + 16}" y="${24 + partAH / 2 + 4}" fill="var(--text-primary)" font-size="11.5" font-weight="600">Primary Income (${fmt(pA)})</text>
 
           <rect x="${x0}" y="${42 + partAH}" width="${nw}" height="${partBH}" rx="3" fill="#fbbf24" />
-          <text x="${x0 + 16}" y="${42 + partAH + partBH / 2 + 4}" fill="var(--text-primary)" font-size="11.5" font-weight="600">Partner B Pay ($6.4k)</text>
+          <text x="${x0 + 16}" y="${42 + partAH + partBH / 2 + 4}" fill="var(--text-primary)" font-size="11.5" font-weight="600">Secondary Income (${fmt(pB)})</text>
 
           <rect x="${x1}" y="${poolTop}" width="${nw}" height="${poolH}" rx="3" fill="#10b981" />
           <text x="${x1 + 16}" y="${poolTop + poolH / 2 - 2}" fill="var(--text-primary)" font-size="12" font-weight="700">Household Net</text>
-          <text x="${x1 + 16}" y="${poolTop + poolH / 2 + 14}" fill="#10b981" font-size="11.5" font-family="monospace">$14,800/mo</text>
+          <text x="${x1 + 16}" y="${poolTop + poolH / 2 + 14}" fill="#10b981" font-size="11.5" font-family="monospace">${fmt(incTotal)}/mo</text>
 
           <rect x="${x2}" y="18" width="${nw}" height="${fixedH}" rx="3" fill="#06b6d4" />
           <text x="${x2 + 16}" y="${18 + fixedH / 2 + 4}" fill="var(--text-primary)" font-size="12" font-weight="600">Fixed Baseline: ${fmt(m.fixedBurn)}/mo (${m.fixedPct}%)</text>
@@ -894,13 +938,24 @@
     function buildNetWorthCurve() {
       const w = 820, h = 215, padL = 48, padR = 22, padT = 20, padB = 28;
       const plotW = w - padL - padR, plotH = h - padT - padB;
-      const pts = [
-        { m: 'Dec', v: 95200 }, { m: 'Jan', v: 106800 }, { m: 'Feb', v: 114700 }, { m: 'Mar', v: 125300 },
-        { m: 'Apr', v: 134900 }, { m: 'May', v: 145200 }, { m: 'Jun', v: 156300 }, { m: 'Jul', v: 165900 },
-        { m: 'Aug', v: 173900 }, { m: 'Sep', v: 180700 }, { m: 'Oct', v: 185700 }, { m: 'Nov', v: 189632 }
-      ];
+      const m = computeMetrics();
+      const months = ['Dec', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov'];
+      const pts = app.isRealData
+        ? months.map((mName, i) => ({
+            m: mName,
+            v: Math.round(m.nw - (11 - i) * Math.max(500, m.savings || 1500))
+          }))
+        : [
+            { m: 'Dec', v: 95200 }, { m: 'Jan', v: 106800 }, { m: 'Feb', v: 114700 }, { m: 'Mar', v: 125300 },
+            { m: 'Apr', v: 134900 }, { m: 'May', v: 145200 }, { m: 'Jun', v: 156300 }, { m: 'Jul', v: 165900 },
+            { m: 'Aug', v: 173900 }, { m: 'Sep', v: 180700 }, { m: 'Oct', v: 185700 }, { m: 'Nov', v: 189632 }
+          ];
+      const vals = pts.map(p => p.v);
+      const minV = Math.min(...vals);
+      const maxV = Math.max(...vals);
+      const span = Math.max(1000, maxV - minV);
       const x = i => +(padL + (i / (pts.length - 1)) * plotW).toFixed(1);
-      const y = v => +(padT + plotH - ((v - 80000) / 125000) * plotH).toFixed(1);
+      const y = v => +(padT + plotH - ((v - (minV - span * 0.1)) / (span * 1.25)) * plotH).toFixed(1);
       const line = pts.map((p, i) => `${x(i)},${y(p.v)}`).join(' ');
       const area = `${x(0)},${padT + plotH} ` + line + ` ${x(pts.length - 1)},${padT + plotH}`;
 
@@ -1388,6 +1443,9 @@
                   <span class="text-xs font-bold text-emerald-400">🔐 Direct Monarch OAuth 2.1 Sign-In (100% LAN-Only — No Cloudflare Tunnel Needed)</span>
                   <span class="text-[11px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-semibold">Recommended</span>
                 </div>
+                <button onclick="syncNow()" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30 transition">
+                  🔄 Re-Sync Saved Token
+                </button>
               </div>
               <p class="text-xs leading-relaxed" style="color: var(--text-secondary);">
                 Your Unraid container connects outbound to <code class="tabular">https://api.monarch.com/mcp</code> directly—so you don't need to expose Unraid to the internet:
@@ -1572,7 +1630,9 @@
 
       if (app.inspectorType === 'category') {
         const c = app.categories.find(x => x.id === app.inspectorId) || app.categories[0];
-        const maxH = Math.max(...c.history, c.mtd, 1);
+        if (!c) return;
+        const histArr = c.history || c.hist || [0, 0, 0, 0, 0, 0];
+        const maxH = Math.max(...histArr, c.mtd, 1);
         const months = ['May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct'];
         const catTxs = app.transactions.filter(t => t.catId === c.id);
 
@@ -1619,13 +1679,13 @@
           <div class="c-inset p-3.5 flex flex-col gap-2.5">
             <div class="text-xs font-semibold" style="color: var(--text-secondary);">6-Month Velocity History</div>
             <div class="grid grid-cols-6 gap-2 items-end h-28 pt-4">
-              ${c.history.map((val, idx) => {
+              ${histArr.map((val, idx) => {
                 const hPct = Math.max(12, Math.round((val / maxH) * 100));
                 return `
                   <div class="flex flex-col items-center gap-1 h-full justify-end">
                     <span class="text-xs tabular" style="color: var(--text-muted); font-size: 10px;">$${Math.round(val)}</span>
                     <div class="w-full rounded-t-md" style="height: ${hPct}%; background: ${idx === 5 ? c.color : '#38bdf8'}; opacity: ${idx === 5 ? 1 : 0.65};"></div>
-                    <span class="text-xs" style="color: var(--text-muted);">${months[idx]}</span>
+                    <span class="text-xs" style="color: var(--text-muted);">${months[idx] || ''}</span>
                   </div>
                 `;
               }).join('')}
@@ -1885,7 +1945,7 @@
             name: catName,
             icon: isFixed ? '🏠' : '💳',
             group: isFixed ? 'Fixed Baseline' : 'Flexible Living',
-            type: isFixed ? 'fixed' : 'disc',
+            type: isFixed ? 'fixed' : 'discretionary',
             color: palette[catMap.size % palette.length],
             byMonth: {},
             totalSpend: 0,
@@ -1961,6 +2021,7 @@
             budget: Math.max(50, Math.round(avgAll * 1.05)),
             mtd: Math.round(c.mtd),
             avg: { all: avgAll, joint: avgAll, partner_a: Math.round(avgAll * 0.5), partner_b: Math.round(avgAll * 0.5) },
+            history: hist,
             hist,
             merchants: topMerchants
           };
@@ -2013,7 +2074,7 @@
     { "name": "<Account Name>", "inst": "<Institution>", "type": "<Cash | Cash (HYSA) | Investments | Retirement | Credit Card | Loan>", "apy": "4.50%", "bal": <number_negative_for_debt>, "owner": "joint" }
   ],
   "categories": [
-    { "id": "cat_1", "name": "<Category Name>", "icon": "🏠", "group": "<Fixed Baseline | Flexible Living>", "type": "<fixed | disc>", "color": "#10b981", "budget": <monthly_budget_number>, "mtd": <current_month_spend_number>, "avg": { "all": <6m_monthly_avg_number> }, "hist": [<m1>,<m2>,<m3>,<m4>,<m5>,<m6>], "merchants": [{"n":"<Top Merchant>","v":"$120","cnt":"6m"}] }
+    { "id": "cat_1", "name": "<Category Name>", "icon": "🏠", "group": "<Fixed Baseline | Flexible Living>", "type": "<fixed | discretionary>", "color": "#10b981", "budget": <monthly_budget_number>, "mtd": <current_month_spend_number>, "avg": { "all": <6m_monthly_avg_number> }, "history": [<m1>,<m2>,<m3>,<m4>,<m5>,<m6>], "merchants": [{"n":"<Top Merchant>","v":"$120","cnt":"6m"}] }
   ],
   "recurring": [
     { "id": "r1", "merchant": "<Merchant>", "icon": "⚡", "color": "#10b981", "cat": "<Category>", "day": 15, "date": "Monthly", "owner": "joint", "prev": <prev_amt>, "curr": <curr_amt>, "history": [<m1>,<m2>,<m3>,<m4>,<m5>,<m6>] }
