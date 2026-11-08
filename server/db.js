@@ -2,16 +2,36 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { DatabaseSync } = require('node:sqlite');
 
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+let DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
+try {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o777 });
+  }
+  fs.accessSync(DATA_DIR, fs.constants.W_OK);
+} catch (err) {
+  console.warn(`[Monarch Smart CFO] Warning: ${DATA_DIR} is not writable (${err.message}). Falling back to /tmp/monarch-cfo-data.`);
+  DATA_DIR = '/tmp/monarch-cfo-data';
+  fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o777 });
 }
 
-const DB_PATH = path.join(DATA_DIR, 'monarch-cfo.sqlite');
-const db = new DatabaseSync(DB_PATH);
+let DB_PATH = path.join(DATA_DIR, 'monarch-cfo.sqlite');
+let db;
+try {
+  db = new DatabaseSync(DB_PATH);
+} catch (openErr) {
+  console.warn(`[Monarch Smart CFO] Warning: Failed to open SQLite at ${DB_PATH} (${openErr.message}). Falling back to /tmp/monarch-cfo-data/monarch-cfo.sqlite.`);
+  DATA_DIR = '/tmp/monarch-cfo-data';
+  fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o777 });
+  DB_PATH = path.join(DATA_DIR, 'monarch-cfo.sqlite');
+  db = new DatabaseSync(DB_PATH);
+}
 
-// Enable WAL mode for high concurrency & fast reads on Unraid appdata SSD/cache drive
-db.exec(`PRAGMA journal_mode = WAL;`);
+// Enable WAL mode when supported; fall back to DELETE on Unraid shfs FUSE mounts that disallow mmap/-shm
+try {
+  db.exec(`PRAGMA journal_mode = WAL;`);
+} catch (walErr) {
+  db.exec(`PRAGMA journal_mode = DELETE;`);
+}
 db.exec(`PRAGMA foreign_keys = ON;`);
 
 function initSchema() {
